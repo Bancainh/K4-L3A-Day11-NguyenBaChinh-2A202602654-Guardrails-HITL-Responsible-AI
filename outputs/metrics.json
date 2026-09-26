@@ -1,5 +1,7 @@
 {
   "total_requests": 20,
+  "api_errors": 0,
+  "redacted_responses": 0,
   "blocked_requests": 11,
   "block_rate": 0.55,
   "rate_limit_hits": 2,
