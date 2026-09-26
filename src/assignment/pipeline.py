@@ -14,55 +14,19 @@ from assignment.monitoring import MonitoringAlert
 def is_egress_allowed(destination: str, payload: str) -> bool:
     """Enforce a destination allowlist before any data leaves the agent."""
 
-    import re
-    from urllib.parse import urlparse
+    from urllib.parse import urlsplit
+    from guardrails.sensitive_data import filter_sensitive_data
 
-    # Chỉ cho phép đúng các VinBank host đã duyệt
-    ALLOWED_HOSTS = {
-        "api.vinbank.example",
-        "cases.vinbank.example",
-    }
-
-    # 1. Parse URL
     try:
-        parsed = urlparse(destination)
-    except Exception:
-        return False
-
-    # 2. Bắt buộc HTTPS
-    if parsed.scheme.lower() != "https":
-        return False
-
-    # 3. Host phải khớp chính xác allowlist
-    if parsed.hostname not in ALLOWED_HOSTS:
-        return False
-
-    # 4. Không cho dữ liệu nhạy cảm đi ra ngoài
-    SENSITIVE_PATTERNS = [
-        # Demo password
-        r"\badmin123\b",
-
-        # API key
-        r"\bsk-[a-zA-Z0-9-]+\b",
-
-        # Database host
-        r"\bdb\.vinbank\.internal(?::\d+)?\b",
-
-        # Password nói chung
-        r"\bpassword\s*(?:is|[:=])\s*\S+",
-
-        # Số điện thoại VN
-        r"\b0\d{9,10}\b",
-
-        # Email
-        r"\b[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
-    ]
-
-    for pattern in SENSITIVE_PATTERNS:
-        if re.search(pattern, payload or "", re.IGNORECASE):
+        parsed = urlsplit(destination)
+        if (parsed.scheme.lower() != "https"
+                or parsed.hostname not in {"api.vinbank.example", "cases.vinbank.example"}
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443)):
             return False
-
-    return True
+    except (ValueError, TypeError):
+        return False
+    return filter_sensitive_data(payload)["safe"]
 
 
 def build_production_plugins(
@@ -109,7 +73,6 @@ async def run_assignment_suite(pipeline) -> dict:
 
     from agents.agent import create_blue_agent
     from core.utils import chat_with_agent
-    from guardrails.input_guardrails import detect_injection, topic_filter
 
     # ========================================================
     # Components
@@ -170,62 +133,52 @@ async def run_assignment_suite(pipeline) -> dict:
 
         monitor.total_requests += 1
 
-        # ---------------------------------------------
-        # Xác định input guardrail có chặn hay không.
-        #
-        # Ta dùng lại chính các function CP2,
-        # không viết lại logic mới.
-        # ---------------------------------------------
-
+        print(f"[Blue {request_id}] Processing...", flush=True)
+        before = {
+            p.name: (getattr(p, "blocked_count", 0), getattr(p, "redacted_count", 0))
+            for p in plugins
+        }
         blocked = False
+        redacted = False
         layer = None
-
-        if detect_injection(text) == "BLOCK":
-            blocked = True
-            layer = "input_guardrail"
-
-        elif topic_filter(text) == "BLOCK":
-            blocked = True
-            layer = "input_guardrail"
-
-        # ---------------------------------------------
-        # Chạy thật qua Blue Agent
-        # ---------------------------------------------
-
+        error = None
         try:
-            response, _ = await chat_with_agent(
-                blue_agent,
-                blue_runner,
-                text,
-            )
-
+            response, _ = await chat_with_agent(blue_agent, blue_runner, text)
         except Exception as exc:
-            response = f"ERROR: {type(exc).__name__}: {exc}"
+            # Do not publish provider bodies: they can contain account identifiers.
+            code = getattr(exc, "status_code", None)
+            error = f"{type(exc).__name__}" + (f" (HTTP {code})" if code else "")
+            response = f"ERROR: {error}"
 
-        # ---------------------------------------------
-        # Monitoring
-        # ---------------------------------------------
-
+        # Observe the plugins that actually ran, not a second offline prediction.
+        for plugin in plugins:
+            old_blocked, old_redacted = before[plugin.name]
+            if getattr(plugin, "blocked_count", 0) > old_blocked:
+                blocked = True
+                layer = plugin.name
+                break
+            if getattr(plugin, "redacted_count", 0) > old_redacted:
+                redacted = True
+                layer = plugin.name
+        if error:
+            layer = "error"
+            monitor.api_errors += 1
         if blocked:
             monitor.blocked_requests += 1
-
-        # ---------------------------------------------
-        # Audit: request kết thúc
-        # ---------------------------------------------
-
+            if layer == "rate_limiter":
+                monitor.rate_limit_hits += 1
+        if redacted:
+            monitor.redacted_responses += 1
+        status = "error" if error else "blocked" if blocked else "redacted" if redacted else "ok"
         audit.record_output(
-            user_id=user_id,
-            text=response,
-            blocked=blocked,
-            layer=layer,
-            request_id=request_id,
+            user_id=user_id, text=response, blocked=blocked, layer=layer,
+            request_id=request_id, status=status, error=error, redacted=redacted,
         )
-
+        print(f"[Blue {request_id}] {status}", flush=True)
         return {
-            "input": text,
-            "blocked": blocked,
-            "layer": layer,
+            "input": text, "blocked": blocked, "layer": layer,
             "response_preview": (response or "")[:300],
+            "status": status, "error": error, "redacted": redacted,
         }
 
     # ========================================================
@@ -441,6 +394,8 @@ async def run_assignment_suite(pipeline) -> dict:
 
     results = {
         "framework": "google-adk",
+        "blue_provider": blue_runner.provider,
+        "blue_model": blue_runner.model,
         "safe_queries": safe_results,
         "attack_queries": attack_results,
         "rate_limit": rate_limit_result,
@@ -480,4 +435,9 @@ async def run_assignment_suite(pipeline) -> dict:
     monitor.check_metrics()
     monitor.export_json()
 
+    if monitor.api_errors:
+        raise RuntimeError(
+            f"Blue suite has {monitor.api_errors} API error(s). "
+            "Artifacts contain error status; retry CP3 before submitting."
+        )
     return results

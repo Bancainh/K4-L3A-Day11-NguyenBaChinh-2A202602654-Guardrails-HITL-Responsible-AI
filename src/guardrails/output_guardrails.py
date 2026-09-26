@@ -28,49 +28,10 @@ from core.utils import chat_with_agent
 # ============================================================
 
 def content_filter(response: str) -> dict:
-    """Filter response for PII, secrets, and harmful content."""
+    """Redact protected values and PII using the same rules as egress."""
+    from guardrails.sensitive_data import filter_sensitive_data
 
-    issues = []
-    redacted = response
-
-    PII_PATTERNS = {
-        # Số điện thoại Việt Nam
-        "phone": r"\b0\d{9,10}\b",
-
-        # Email
-        "email": r"\b[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
-
-        # CMND / CCCD
-        "national_id": r"\b(?:\d{9}|\d{12})\b",
-
-        # API key dạng sk-...
-        "api_key": r"\bsk-[a-zA-Z0-9-]+\b",
-
-        # password is xxx / password: xxx / password=xxx
-        "password": r"\bpassword\s*(?:is|[:=])\s*\S+",
-
-        # DB host demo của lab
-        "db_host": r"\bdb\.vinbank\.internal(?::\d+)?\b",
-    }
-
-    for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, redacted, re.IGNORECASE)
-
-        if matches:
-            issues.append(f"{name}: {len(matches)} found")
-
-            redacted = re.sub(
-                pattern,
-                "[REDACTED]",
-                redacted,
-                flags=re.IGNORECASE,
-            )
-
-    return {
-        "safe": len(issues) == 0,
-        "issues": issues,
-        "redacted": redacted,
-    }
+    return filter_sensitive_data(response)
 
 # ============================================================
 # OPTIONAL (không chấm): LLM-as-Judge

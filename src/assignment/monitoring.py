@@ -38,6 +38,8 @@ class MonitoringAlert:
     total_requests: int = 0
     blocked_requests: int = 0
     rate_limit_hits: int = 0
+    api_errors: int = 0
+    redacted_responses: int = 0
     judge_checks: int = 0
     judge_fails: int = 0
 
@@ -152,6 +154,8 @@ class MonitoringAlert:
         )
         return {
             "total_requests": self.total_requests,
+            "api_errors": self.api_errors,
+            "redacted_responses": self.redacted_responses,
             "blocked_requests": self.blocked_requests,
             "block_rate": block_rate,
             "rate_limit_hits": self.rate_limit_hits,

@@ -54,6 +54,9 @@ class AuditLogPlugin:
         blocked: bool = False,
         layer: str | None = None,
         request_id: str | None = None,
+        status: str | None = None,
+        error: str | None = None,
+        redacted: bool = False,
     ):
         import time
 
@@ -83,6 +86,9 @@ class AuditLogPlugin:
             "blocked": blocked,
             "layer": layer,
             "finished_at": utc_now_iso(),
+            "status": status or ("blocked" if blocked else "ok"),
+            "error": error,
+            "redacted": redacted,
             "latency_ms": latency_ms,
         }
 
