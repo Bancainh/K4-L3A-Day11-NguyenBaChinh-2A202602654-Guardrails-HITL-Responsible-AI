@@ -11,7 +11,6 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -19,6 +18,7 @@ from google.adk.plugins import base_plugin
 from google.adk.agents.invocation_context import InvocationContext
 
 from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
+from guardrails.sensitive_data import normalize_text
 
 
 # Quyết định rõ ràng — tránh đảo nghĩa True/False
@@ -50,12 +50,7 @@ def detect_injection(user_input: str) -> InputStatus:
     # Ta loại bỏ các ký tự vô hình trước khi chạy regex.
     # --------------------------------------------------------
 
-    normalized = unicodedata.normalize("NFKC", user_input or "")
-
-    invisible_chars = "\u200b\u200c\u200d\ufeff\u2060"
-
-    for char in invisible_chars:
-        normalized = normalized.replace(char, "")
+    normalized = normalize_text(user_input, fold_accents=True)
 
     # Chuẩn hóa nhiều khoảng trắng thành 1 khoảng trắng.
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -65,6 +60,11 @@ def detect_injection(user_input: str) -> InputStatus:
     # --------------------------------------------------------
 
     INJECTION_PATTERNS = [
+        r"\b(?:ignore|disregard|forget|override)\s+(?:(?:all|your|the|previous|above|prior|earlier|system)\s+)*(?:instructions?|rules?|directives?)\b",
+        r"\b(?:bo\s+qua|quen)\s+(?:(?:tat\s+ca|moi|cac|truoc\s+do)\s+)*(?:huong\s+dan|chi\s+thi|quy\s+tac)\b",
+        r"\b(?:reveal|disclose|print|show|return)\s+(?:(?:me|your|the|exact|internal|administrator|admin|stored)\s+)*(?:credentials?|secrets?|password|api[_\s-]*key)\b",
+        r"\b(?:tiet\s+lo|in\s+ra|hien\s+thi)\s+(?:mat\s+khau|chi\s+thi\s+he\s+thong)\b",
+
         # Ignore previous instructions
         r"\bignore\s+(?:all\s+)?(?:previous|above|prior)\s+instructions?\b",
 
@@ -113,39 +113,26 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
 
-    input_lower = (user_input or "").lower()
+    text = normalize_text(user_input, fold_accents=True).casefold()
 
-    # --------------------------------------------------------
-    # Step 1:
-    # Nếu có blocked topic -> chặn ngay.
-    #
-    # Phải kiểm tra BLOCKED trước ALLOWED.
-    #
-    # Ví dụ:
-    # "How to hack a bank account?"
-    #
-    # có "account" -> allowed
-    # nhưng cũng có "hack" -> blocked
-    #
-    # => phải BLOCK
-    # --------------------------------------------------------
+    def has_phrase(phrase: str) -> bool:
+        phrase = normalize_text(phrase, fold_accents=True).casefold()
+        return re.search(r"\b" + re.escape(phrase) + r"\b", text) is not None
 
-    if any(topic.lower() in input_lower for topic in BLOCKED_TOPICS):
+    if not any(has_phrase(topic) for topic in ALLOWED_TOPICS):
         return "BLOCK"
-
-    # --------------------------------------------------------
-    # Step 2:
-    # Phải chứa ít nhất một banking topic.
-    # --------------------------------------------------------
-
-    if not any(topic.lower() in input_lower for topic in ALLOWED_TOPICS):
+    # Reject requests to attack even when a protective phrase is appended.
+    harmful_intent = re.search(
+        r"\b(?:how\s+(?:can|do)\s+i|how\s+to|help\s+me|teach\s+me\s+to)\s+"
+        r"(?:hack|exploit|steal)\b|\b(?:cach|huong\s+dan)\s+(?:hack|tan\s+cong)\b",
+        text,
+    )
+    if harmful_intent:
         return "BLOCK"
-
-    # --------------------------------------------------------
-    # Step 3:
-    # Banking + không chứa forbidden topic
-    # --------------------------------------------------------
-
+    for topic in BLOCKED_TOPICS:
+        if has_phrase(topic):
+            return "BLOCK"
+    # 'hacked' is a distinct word: a victim asking for banking support is allowed.
     return "ALLOW"
 
 
